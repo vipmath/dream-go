@@ -267,20 +267,31 @@ class PolicyHead:
         glorot_op = tf.glorot_normal_initializer()
         zeros_op = tf.zeros_initializer()
 
-        self._downsample = tf.get_variable('downsample', (1, 1, num_features, 2), tf.float32, glorot_op)
-        self._bn = BatchNorm(2, collection=PolicyHead.VARIABLES)
-        self._weights = tf.get_variable('weights', (722, 362), tf.float32, glorot_op)
-        self._bias = tf.get_variable('bias', (362,), tf.float32, zeros_op)
+        self._downsample_1 = tf.get_variable('downsample_1', (1, 1, num_features, 2), tf.float32, glorot_op)
+        self._downsample_2 = tf.get_variable('downsample_2', (1, 1, num_features, 16), tf.float32, glorot_op)
+        self._bn_1 = BatchNorm(2, '_1', collection=PolicyHead.VARIABLES)
+        self._bn_2 = BatchNorm(16, '_2', collection=PolicyHead.VARIABLES)
+        self._weights_1 = tf.get_variable('weights_1', (722, 362), tf.float32, glorot_op)
+        self._weights_2 = tf.get_variable('weights_2', (32, 2), tf.float32, glorot_op)
+        self._bias_1 = tf.get_variable('bias_1', (362,), tf.float32, zeros_op)
+        self._bias_2 = tf.get_variable('bias_2', (2,), tf.float32, zeros_op)
 
-        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._downsample)
-        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._weights)
-        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._bias)
+        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._downsample_1)
+        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._downsample_2)
+        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._weights_1)
+        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._weights_2)
+        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._bias_1)
+        tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, self._bias_2)
 
-        tf.add_to_collection(PolicyHead.VARIABLES, self._downsample)
-        tf.add_to_collection(PolicyHead.VARIABLES, self._weights)
-        tf.add_to_collection(PolicyHead.VARIABLES, self._bias)
+        tf.add_to_collection(PolicyHead.VARIABLES, self._downsample_1)
+        tf.add_to_collection(PolicyHead.VARIABLES, self._downsample_2)
+        tf.add_to_collection(PolicyHead.VARIABLES, self._weights_1)
+        tf.add_to_collection(PolicyHead.VARIABLES, self._weights_2)
+        tf.add_to_collection(PolicyHead.VARIABLES, self._bias_1)
+        tf.add_to_collection(PolicyHead.VARIABLES, self._bias_2)
 
-        tf.add_to_collection(tf.GraphKeys.BIASES, self._bias)
+        tf.add_to_collection(tf.GraphKeys.BIASES, self._bias_1)
+        tf.add_to_collection(tf.GraphKeys.BIASES, self._bias_2)
 
     def dump(self, sess, into=None):
         """ Returns a dictionary that contains all model variables of this head. """
@@ -288,21 +299,38 @@ class PolicyHead:
         if into is None:
             into = {}
 
-        self._bn.dump(sess, self._downsample, into=into)
+        self._bn_1.dump(sess, self._downsample_1, into=into)
+        self._bn_2.dump(sess, self._downsample_2, into=into)
 
-        into[self._weights] = sess.run(self._weights)
-        into[self._bias] = sess.run(self._bias)
+        into[self._weights_1] = sess.run(self._weights_1)
+        into[self._weights_2] = sess.run(self._weights_2)
+        into[self._bias_1] = sess.run(self._bias_1)
+        into[self._bias_2] = sess.run(self._bias_2)
 
         return into
 
     def __call__(self, x, is_training=True):
-        y = tf.nn.conv2d(x, self._downsample, (1, 1, 1, 1), 'SAME', True, 'NCHW')
-        y = self._bn(y, is_training)
+        y = tf.nn.conv2d(x, self._downsample_1, (1, 1, 1, 1), 'SAME', True, 'NCHW')
+        y = self._bn_1(y, is_training)
         y = tf.nn.relu(y)
         tf.add_to_collection(tf.GraphKeys.ACTIVATIONS, tf.identity(y, 'output_1'))
 
-        y = tf.reshape(y, (-1, 722))
-        y = tf.matmul(y, self._weights) + self._bias
+        # Global pooling properties:
+        # https://github.com/lightvector/GoNN#global-pooled-properties
+        p = tf.nn.conv2d(x, self._downsample_2, (1, 1, 1, 1), 'SAME', True, 'NCHW')
+        p = self._bn_2(p, is_training)
+        p = tf.nn.relu(p)
+        tf.add_to_collection(tf.GraphKeys.ACTIVATIONS, tf.identity(p, 'output_2'))
+
+        p_max = tf.nn.max_pool(p, [1, 1, 19, 19], [1, 1, 1, 1], 'VALID', 'NCHW')
+        p_avg = tf.nn.avg_pool(p, [1, 1, 19, 19], [1, 1, 1, 1], 'VALID', 'NCHW')
+        p = tf.reshape(tf.concat([p_max, p_avg], 1), (-1, 32))
+        p = tf.matmul(p, self._weights_2) + self._bias_2
+        p = tf.reshape(p, (-1, 2, 1, 1))
+        p = tf.nn.relu(p)
+
+        y = tf.reshape(y + p, (-1, 722))
+        y = tf.matmul(y, self._weights_1) + self._bias_1
 
         return y
 
@@ -500,7 +528,7 @@ def make_dataset_iterator(files, batch_size=1):
 def main(files, reset=False, reset_lr=False, only_tower=False, only_policy=False, only_value=False):
     """ Main function """
 
-    iterator = make_dataset_iterator(files, batch_size=896)  # 768
+    iterator = make_dataset_iterator(files, batch_size=512)  # 896
 
     with tf.device('cpu:0'):
         global_step = tf.train.create_global_step()
